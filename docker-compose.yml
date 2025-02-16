@@ -1,0 +1,42 @@
+services:
+  zonos:
+    build:
+      context: Zonos
+    container_name: zonos-container
+    runtime: nvidia
+    volumes:
+      - hfhub:/root/.cache/huggingface/
+      - torchhub:/root/.cache/torch/
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  whisper:
+    build:
+      context: whisper_streaming_web
+    container_name: whisper-container
+    runtime: nvidia
+    volumes:
+      - hfhub:/root/.cache/huggingface/
+      - torchhub:/root/.cache/torch/
+    ports:
+      - 8000:8000
+    environment:
+      - TTS_SERVER_HOSTNAME=zonos-container:8001
+    depends_on:
+      - zonos
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  torchhub:
+  hfhub:

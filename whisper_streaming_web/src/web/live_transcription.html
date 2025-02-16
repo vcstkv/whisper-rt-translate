@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Audio Transcription</title>
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      margin: 20px;
+      text-align: center;
+    }
+    #recordButton {
+      width: 80px;
+      height: 80px;
+      font-size: 36px;
+      border: none;
+      border-radius: 50%;
+      background-color: white;
+      cursor: pointer;
+      box-shadow: 0 0px 10px rgba(0, 0, 0, 0.2);
+      transition: background-color 0.3s ease, transform 0.2s ease;
+    }
+    #recordButton.recording {
+      background-color: #ff4d4d;
+      color: white;
+    }
+    #recordButton:active {
+      transform: scale(0.95);
+    }
+    #status {
+      margin-top: 20px;
+      font-size: 16px;
+      color: #333;
+    }
+    .settings-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 15px;
+      margin-top: 20px;
+    }
+    .settings {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 5px;
+    }
+    #chunkSelector,
+    #websocketInput {
+      font-size: 16px;
+      padding: 5px;
+      border-radius: 5px;
+      border: 1px solid #ddd;
+      background-color: #f9f9f9;
+    }
+    #websocketInput {
+      width: 200px;
+    }
+    #chunkSelector:focus,
+    #websocketInput:focus {
+      outline: none;
+      border-color: #007bff;
+    }
+    label {
+      font-size: 14px;
+    }
+    /* Speaker-labeled transcript area */
+    #linesTranscript {
+      margin: 20px auto;
+      max-width: 600px;
+      text-align: left;
+      font-size: 16px;
+    }
+    #linesTranscript p {
+      margin: 5px 0;
+    }
+    #linesTranscript strong {
+      color: #333;
+    }
+    /* Grey buffer styling */
+    .buffer {
+      color: rgb(180, 180, 180);
+      font-style: italic;
+      margin-left: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="settings-container">
+    <button id="recordButton">🎙️</button>
+    <div class="settings">
+      <div>
+        <label for="chunkSelector">Chunk size (ms):</label>
+        <select id="chunkSelector">
+          <option value="500">500 ms</option>
+          <option value="1000" selected>1000 ms</option>
+          <option value="2000">2000 ms</option>
+          <option value="3000">3000 ms</option>
+          <option value="4000">4000 ms</option>
+          <option value="5000">5000 ms</option>
+        </select>
+      </div>
+      <div>
+        <label for="websocketInput">WebSocket URL:</label>
+        <input id="websocketInput" type="text" value="ws://localhost:8000/asr" />
+      </div>
+    </div>
+  </div>
+
+  <p id="status"></p>
+
+  <!-- Speaker-labeled transcript -->
+  <div id="linesTranscript"></div>
+
+  <script>
+    let isRecording = false;
+    let websocket = null;
+    let recorder = null;
+    let chunkDuration = 1000;
+    let websocketUrl = "ws://localhost:8000/asr";
+    let userClosing = false;
+    const audioContext = new AudioContext();
+
+    const statusText = document.getElementById("status");
+    const recordButton = document.getElementById("recordButton");
+    const chunkSelector = document.getElementById("chunkSelector");
+    const websocketInput = document.getElementById("websocketInput");
+    const linesTranscriptDiv = document.getElementById("linesTranscript");
+
+    chunkSelector.addEventListener("change", () => {
+      chunkDuration = parseInt(chunkSelector.value);
+    });
+
+    websocketInput.addEventListener("change", () => {
+      const urlValue = websocketInput.value.trim();
+      if (!urlValue.startsWith("ws://") && !urlValue.startsWith("wss://")) {
+        statusText.textContent = "Invalid WebSocket URL (must start with ws:// or wss://)";
+        return;
+      }
+      websocketUrl = urlValue;
+      statusText.textContent = "WebSocket URL updated. Ready to connect.";
+    });
+
+    function setupWebSocket() {
+      return new Promise((resolve, reject) => {
+        try {
+          websocket = new WebSocket(websocketUrl);
+          websocket.binaryType = "arraybuffer";
+        } catch (error) {
+          statusText.textContent = "Invalid WebSocket URL. Please check and try again.";
+          reject(error);
+          return;
+        }
+
+        websocket.onopen = () => {
+          statusText.textContent = "Connected to server.";
+          resolve();
+        };
+
+        websocket.onclose = () => {
+          if (userClosing) {
+            statusText.textContent = "WebSocket closed by user.";
+          } else {
+            statusText.textContent =
+              "Disconnected from the WebSocket server. (Check logs if model is loading.)";
+          }
+          userClosing = false;
+        };
+
+        websocket.onerror = () => {
+          statusText.textContent = "Error connecting to WebSocket.";
+          reject(new Error("Error connecting to WebSocket"));
+        };
+
+        // Handle messages from server
+        websocket.onmessage = (event) => {
+            audioContext.decodeAudioData(event.data)
+                .then(decodedData => {
+                  // Create a source node for this chunk.
+                  const source = audioContext.createBufferSource();
+                  source.buffer = decodedData;
+                  source.connect(audioContext.destination);
+                  // Start playback immediately.
+                  source.start();
+                })
+                .catch(err => {
+                  console.error("Error decoding audio data:", err);
+                });
+        //   const data = JSON.parse(event.data);
+          /*
+            The server might send:
+            {
+              "lines": [
+                {"speaker": 0, "text": "Hello."},
+                {"speaker": 1, "text": "Bonjour."},
+                ...
+              ],
+              "buffer": "..."
+            }
+          */
+        //   const { lines = [], buffer = "" } = data;
+        //   renderLinesWithBuffer(lines, buffer);
+        };
+      });
+    }
+
+    function renderLinesWithBuffer(lines, buffer) {
+      // Clears if no lines
+      if (!Array.isArray(lines) || lines.length === 0) {
+        linesTranscriptDiv.innerHTML = "";
+        return;
+      }
+      // Build the HTML
+      // The buffer is appended to the last line if it's non-empty
+      const linesHtml = lines.map((item, idx) => {
+        let textContent = item.text;
+        if (idx === lines.length - 1 && buffer) {
+          textContent += `<span class="buffer">${buffer}</span>`;
+        }
+        return `<p><strong>Speaker ${item.speaker}:</strong> ${textContent}</p>`;
+      }).join("");
+
+      linesTranscriptDiv.innerHTML = linesHtml;
+    }
+
+    async function startRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+        recorder.ondataavailable = (e) => {
+          if (websocket && websocket.readyState === WebSocket.OPEN) {
+            websocket.send(e.data);
+          }
+        };
+        recorder.start(chunkDuration);
+        isRecording = true;
+        updateUI();
+      } catch (err) {
+        statusText.textContent = "Error accessing microphone. Please allow microphone access.";
+      }
+    }
+
+    function stopRecording() {
+      userClosing = true;
+      if (recorder) {
+        recorder.stop();
+        recorder = null;
+      }
+      isRecording = false;
+
+      if (websocket) {
+        websocket.close();
+        websocket = null;
+      }
+
+      updateUI();
+    }
+
+    async function toggleRecording() {
+      if (!isRecording) {
+        linesTranscriptDiv.innerHTML = "";
+        try {
+          await setupWebSocket();
+          await startRecording();
+        } catch (err) {
+          statusText.textContent = "Could not connect to WebSocket or access mic. Aborted.";
+        }
+      } else {
+        stopRecording();
+      }
+    }
+
+    function updateUI() {
+      recordButton.classList.toggle("recording", isRecording);
+      statusText.textContent = isRecording ? "Recording..." : "Click to start transcription";
+    }
+
+    recordButton.addEventListener("click", toggleRecording);
+  </script>
+</body>
+</html>

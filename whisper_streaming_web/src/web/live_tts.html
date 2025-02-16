@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Streaming WebM Audio with Text Input</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    #controls {
+      margin-bottom: 20px;
+    }
+    input, button {
+      padding: 8px;
+      font-size: 16px;
+    }
+    button {
+      margin-left: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebM Audio Streamer</h1>
+  <div id="controls">
+    <input type="text" id="textInput" placeholder="Enter text to send" size="50">
+    <button id="sendButton">Send &amp; Play Audio</button>
+  </div>
+
+  <script>
+    const sendButton = document.getElementById("sendButton");
+    const textInput = document.getElementById("textInput");
+
+    const audioContext = new AudioContext();
+    let ws;
+
+    // Set up the WebSocket connection and send the provided text.
+    function setupWebSocket(text) {
+      // If there's an existing connection, close it.
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+      // Replace with your server's WebSocket URL.
+      ws = new WebSocket("ws://10.0.0.14:8001/ws");
+      ws.binaryType = "arraybuffer"; // Expect binary audio chunks.
+
+      ws.onopen = () => {
+        console.log("WebSocket connected. Sending text:", text);
+        ws.send(text);
+      };
+
+      ws.onmessage = (event) => {
+        audioContext.decodeAudioData(event.data)
+          .then(decodedData => {
+            // Create a source node for this chunk.
+            const source = audioContext.createBufferSource();
+            source.buffer = decodedData;
+            source.connect(audioContext.destination);
+            // Start playback immediately.
+            source.start();
+          })
+          .catch(err => {
+            console.error("Error decoding audio data:", err);
+          });
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+      };
+
+      ws.onclose = (event) => {
+        console.log("WebSocket connection closed:", event);
+      };
+    }
+
+    // When the button is clicked, send the text and start audio playback.
+    sendButton.addEventListener("click", () => {
+      const text = textInput.value.trim();
+      if (!text) {
+        alert("Please enter some text.");
+        return;
+      }
+
+      // Establish a new WebSocket connection and send the text.
+      setupWebSocket(text);
+    });
+  </script>
+</body>
+</html>
