@@ -1,6 +1,6 @@
 # Whisper Streaming with FastAPI and WebSocket Integration And Real-Time live translated audio using Zonos Hybrid
 
-This project extends the [Whisper Streaming Web](https://github.com/QuentinFuxa/whisper_streaming_web) implementation by incorporating a live translated audio using [Zonos Hybrid]. 
+This project extends the [Whisper Streaming Web](https://github.com/QuentinFuxa/whisper_streaming_web) implementation by incorporating a live translated audio using [Zonos Hybrid](https://github.com/Zyphra/Zonos). 
 
 ![Demo Screenshot](src/web/demo.png)
 
