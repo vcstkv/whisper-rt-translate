@@ -5,7 +5,7 @@ import os
 import numpy as np
 import ffmpeg
 import websockets
-from time import time
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -54,12 +54,13 @@ parser.add_argument(
 add_shared_args(parser)
 args = parser.parse_args()
 
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 8000
 CHANNELS = 1
 SAMPLES_PER_SEC = SAMPLE_RATE * int(args.min_chunk_size)
 BYTES_PER_SAMPLE = 2  # s16le = 2 bytes per sample
 BYTES_PER_SEC = SAMPLES_PER_SEC * BYTES_PER_SAMPLE
-MAX_BYTES_PER_SEC = 32000 * 5  # 5 seconds of audio at 32 kHz
+MAX_BYTES_PER_SEC = BYTES_PER_SEC * 5  # 5 seconds of audio at 32 kHz
+TIMEOUT = 5
 
 if args.diarization:
     from src.diarization.diarization_online import DiartDiarization
@@ -127,63 +128,43 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("WebSocket connection opened.")
     TTS_SERVER_HOSTNAME = os.environ.get("TTS_SERVER_HOSTNAME", "localhost:8001")
 
-    ffmpeg_process = None
     pcm_buffer = bytearray()
     online = online_factory(args, asr, tokenizer)
     diarization = DiartDiarization(SAMPLE_RATE) if args.diarization else None
 
-    async def restart_ffmpeg():
-        nonlocal ffmpeg_process, online, diarization, pcm_buffer
-        if ffmpeg_process:
-            try:
-                ffmpeg_process.kill()
-                await asyncio.get_event_loop().run_in_executor(None, ffmpeg_process.wait)
-            except Exception as e:
-                logger.warning(f"Error killing FFmpeg process: {e}")
-        ffmpeg_process = await start_ffmpeg_decoder()
-        pcm_buffer = bytearray()
-        online = online_factory(args, asr, tokenizer)
-        if args.diarization:
-            diarization = DiartDiarization(SAMPLE_RATE)
-        logger.info("FFmpeg process started.")
-
-    await restart_ffmpeg()
-
-    async def ffmpeg_stdout_reader():
-        nonlocal ffmpeg_process, online, diarization, pcm_buffer
-        loop = asyncio.get_event_loop()
-        full_transcription = ""
-        beg = time()
-        
-        chunk_history = []  # Will store dicts: {beg, end, text, speaker}
+    try:
         async with websockets.connect(f"ws://{TTS_SERVER_HOSTNAME}/ws") as tts_ws:
             while True:
                 try:
-                    elapsed_time = math.floor((time() - beg) * 10) / 10 # Round to 0.1 sec
-                    ffmpeg_buffer_from_duration = max(int(32000 * elapsed_time), 4096)
-                    beg = time()
-
-                    # Read chunk with timeout
-                    try:
-                        chunk = await asyncio.wait_for(
-                            loop.run_in_executor(
-                                None, ffmpeg_process.stdout.read, ffmpeg_buffer_from_duration
-                            ),
-                            timeout=5.0
+                # Receive incoming WebM audio chunks from the client
+                    message = await asyncio.wait_for(websocket.receive_bytes(), timeout=5)
+                    pcm_buffer.extend(message)
+                    # logger.info(f"Received Message: {len(message)} bytes")
+                    # logger.info(f"Bytes per Second: {BYTES_PER_SEC} bytes")
+                    # logger.info(f"Length of pcm buffer: {len(pcm_buffer)}")
+                    # logger.info(f"timer: {curr_time - start_time}")
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout waiting for audio chunk. Continuing loop...")
+                    if len(pcm_buffer) > 0:
+                        logger.info(f"Buffer size: {len(pcm_buffer)}")
+                        pcm_array = (
+                                np.frombuffer(pcm_buffer[:MAX_BYTES_PER_SEC], dtype=np.int16).astype(np.float32)
+                                    / 32768.0
                         )
-                    except asyncio.TimeoutError:
-                        logger.warning("FFmpeg read timeout. Restarting...")
-                        await restart_ffmpeg()
-                        full_transcription = ""
-                        chunk_history = []
-                        beg = time()
-                        continue  # Skip processing and read from new process
+                        pcm_buffer = pcm_buffer[MAX_BYTES_PER_SEC:]
+                        logger.info(f"{len(online.audio_buffer) / online.SAMPLING_RATE} seconds of audio will be processed by the model.")
+                        online.insert_audio_chunk(pcm_array)
+                        transcription = online.process_iter()
+                                
+                        if transcription.text == "":
+                            continue
 
-                    if not chunk:
-                        logger.info("FFmpeg stdout closed.")
-                        break
+                        print("Send:", transcription.text)
+                        await tts_ws.send(transcription.text)
+                        tts = await tts_ws.recv()
+                        await websocket.send_bytes(tts)
+                    
 
-                    pcm_buffer.extend(chunk)
                     if len(pcm_buffer) >= BYTES_PER_SEC:
                         if len(pcm_buffer) > MAX_BYTES_PER_SEC:
                             logger.warning(
@@ -206,38 +187,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("Send:", transcription.text)
                         await tts_ws.send(transcription.text)
                         tts = await tts_ws.recv()
-
                         await websocket.send_bytes(tts)
-                        
-                except Exception as e:
-                    logger.warning(f"Exception in ffmpeg_stdout_reader: {e}")
-                    break
 
-            logger.info("Exiting ffmpeg_stdout_reader...")
-
-    stdout_reader_task = asyncio.create_task(ffmpeg_stdout_reader())
-
-    try:
-        while True:
-            # Receive incoming WebM audio chunks from the client
-            message = await websocket.receive_bytes()
-            try:
-                ffmpeg_process.stdin.write(message)
-                ffmpeg_process.stdin.flush()
-            except (BrokenPipeError, AttributeError) as e:
-                logger.warning(f"Error writing to FFmpeg: {e}. Restarting...")
-                await restart_ffmpeg()
-                ffmpeg_process.stdin.write(message)
-                ffmpeg_process.stdin.flush()
     except WebSocketDisconnect:
         logger.warning("WebSocket disconnected.")
     finally:
-        stdout_reader_task.cancel()
-        try:
-            ffmpeg_process.stdin.close()
-            ffmpeg_process.wait()
-        except:
-            pass
         if args.diarization:
             diarization.close()
 
