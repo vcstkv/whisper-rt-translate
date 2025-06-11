@@ -95,7 +95,7 @@ class OnlineASRProcessor:
       - "sentence": trims at sentence boundaries (using a sentence tokenizer)
       - "segment": trims at fixed segment durations.
     """
-    SAMPLING_RATE = 16000
+    SAMPLING_RATE = 8000
 
     def __init__(
         self,
@@ -326,7 +326,7 @@ class VACOnlineASRProcessor:
     and when the system detects a pause in speech (or end of an utterance)
     it finalizes the utterance immediately.
     """
-    SAMPLING_RATE = 16000
+    SAMPLING_RATE = 8000
 
     def __init__(self, online_chunk_size: float, *args, **kwargs):
         self.online_chunk_size = online_chunk_size

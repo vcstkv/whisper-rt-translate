@@ -20,9 +20,9 @@ import logging
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logging.getLogger().setLevel(logging.WARNING)
+logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 ##### LOAD ARGS #####
 
@@ -54,19 +54,20 @@ parser.add_argument(
 add_shared_args(parser)
 args = parser.parse_args()
 
-SAMPLE_RATE = 8000
+SAMPLE_RATE = 16000
 CHANNELS = 1
-SAMPLES_PER_SEC = SAMPLE_RATE * int(args.min_chunk_size)
+SAMPLES_PER_MIN_CHUNK = SAMPLE_RATE * int(args.min_chunk_size)
 BYTES_PER_SAMPLE = 2  # s16le = 2 bytes per sample
-BYTES_PER_SEC = SAMPLES_PER_SEC * BYTES_PER_SAMPLE
-MAX_BYTES_PER_SEC = BYTES_PER_SEC * 5  # 5 seconds of audio at 32 kHz
-TIMEOUT = 5
+BYTES_PER_MIN_CHUNK = SAMPLES_PER_MIN_CHUNK * BYTES_PER_SAMPLE
+MAX_BYTES = BYTES_PER_MIN_CHUNK * 5  # 5 seconds of audio at 32 kHz
 
 if args.diarization:
     from src.diarization.diarization_online import DiartDiarization
 
 
 ##### LOAD APP #####
+
+queue = asyncio.Queue()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -121,12 +122,25 @@ async def get():
 async def get():
     return HTMLResponse(html_tts)
 
+
+@app.websocket("/recv")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await queue.get()
+            await websocket.send_bytes(data)
+    except WebSocketDisconnect:
+        logger.warning("WebSocket disconnected.")        
+
+
 @app.websocket("/asr")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
 
     logger.info("WebSocket connection opened.")
     TTS_SERVER_HOSTNAME = os.environ.get("TTS_SERVER_HOSTNAME", "localhost:8001")
+    FORWARD_AUDIO_PORT = os.environ.get("FORWARD_AUDIO_PORT", "localhost:8002")
 
     pcm_buffer = bytearray()
     online = online_factory(args, asr, tokenizer)
@@ -135,59 +149,67 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         async with websockets.connect(f"ws://{TTS_SERVER_HOSTNAME}/ws") as tts_ws:
             while True:
-                try:
-                # Receive incoming WebM audio chunks from the client
-                    message = await asyncio.wait_for(websocket.receive_bytes(), timeout=5)
-                    pcm_buffer.extend(message)
-                    # logger.info(f"Received Message: {len(message)} bytes")
-                    # logger.info(f"Bytes per Second: {BYTES_PER_SEC} bytes")
-                    # logger.info(f"Length of pcm buffer: {len(pcm_buffer)}")
-                    # logger.info(f"timer: {curr_time - start_time}")
-                except asyncio.TimeoutError:
-                    logger.warning("Timeout waiting for audio chunk. Continuing loop...")
-                    if len(pcm_buffer) > 0:
-                        logger.info(f"Buffer size: {len(pcm_buffer)}")
-                        pcm_array = (
-                                np.frombuffer(pcm_buffer[:MAX_BYTES_PER_SEC], dtype=np.int16).astype(np.float32)
-                                    / 32768.0
-                        )
-                        pcm_buffer = pcm_buffer[MAX_BYTES_PER_SEC:]
-                        logger.info(f"{len(online.audio_buffer) / online.SAMPLING_RATE} seconds of audio will be processed by the model.")
-                        online.insert_audio_chunk(pcm_array)
-                        transcription = online.process_iter()
-                                
-                        if transcription.text == "":
-                            continue
+                # try:
+             
+                    message = await websocket.receive_bytes()
+                    await queue.put(message)
+                #     pcm_buffer.extend(message)
+                #     # logger.info(f"Received Message: {len(message)} bytes")
+                #     # logger.info(f"Bytes per Second: {BYTES_PER_SEC} bytes")
+                #     # logger.info(f"Length of pcm buffer: {len(pcm_buffer)}")
+                #     # logger.info(f"timer: {curr_time - start_time}")
+                #     if len(pcm_buffer) >= BYTES_PER_MIN_CHUNK:
+                #         if len(pcm_buffer) > MAX_BYTES:
+                #             logger.warning(
+                #                 f"""Audio buffer is too large: {len(pcm_buffer) / BYTES_PER_MIN_CHUNK:.2f} seconds.
+                #                 The model probably struggles to keep up. Consider using a smaller model.
+                #                 """)
+                #         # Convert int16 -> float32
+                #         pcm_array = (
+                #             np.frombuffer(pcm_buffer[:MAX_BYTES], dtype=np.int16).astype(np.float32)
+                #             / 32768.0
+                #         )
+                #         pcm_buffer = pcm_buffer[MAX_BYTES:]
+                #         logger.info(f"{len(pcm_array)} pcm array length")
+                #         logger.info(f"{len(online.audio_buffer) / online.SAMPLING_RATE} seconds of audio will be processed by the model.")
+                #         online.insert_audio_chunk(pcm_array)
+                #         transcription = online.process_iter()
 
-                        print("Send:", transcription.text)
-                        await tts_ws.send(transcription.text)
-                        tts = await tts_ws.recv()
-                        await websocket.send_bytes(tts)
+                #         if transcription.text == "":
+                #             continue
+
+                #         logger.info(f"Send:", transcription.text)
+                #         await tts_ws.send(transcription.text)
+                #         tts = await tts_ws.recv()
+                #         #await websocket.send_bytes(tts)
+                #         logger.info("AUDIO HAS BEEN SENT BACK TO UE")
+
+                # except asyncio.TimeoutError:
+                #     logger.warning("Timeout waiting for audio chunk. Continuing loop...")
+                #     if len(pcm_buffer) == 0:
+                #         continue
+
+                #     logger.info(f"Buffer size: {len(pcm_buffer)}")
+                #     pcm_array = (
+                #             np.frombuffer(pcm_buffer, dtype=np.int16).astype(np.float32)
+                #                 / 32768.0
+                #     )
+                #     np.append(pcm_array, np.zeros(SAMPLES_PER_MIN_CHUNK - len(pcm_array)))
+                #     pcm_buffer = pcm_buffer[MAX_BYTES:]
+                #     online.insert_audio_chunk(pcm_array)
+                #     logger.info(f"{len(online.audio_buffer) / online.SAMPLING_RATE} seconds of audio will be processed by the model.")
+                #     transcription = online.process_iter()
+                            
+                #     if transcription.text == "":
+                #         continue
+
+                #     logger.info(f"Send: {transcription.text}")
+                #     await tts_ws.send(transcription.text)
+                #     tts = await tts_ws.recv()
+                #     #await websocket.send_bytes(tts)
+                #     logger.info("AUDIO HAS BEEN SENT BACK TO UE")
                     
 
-                    if len(pcm_buffer) >= BYTES_PER_SEC:
-                        if len(pcm_buffer) > MAX_BYTES_PER_SEC:
-                            logger.warning(
-                                f"""Audio buffer is too large: {len(pcm_buffer) / BYTES_PER_SEC:.2f} seconds.
-                                The model probably struggles to keep up. Consider using a smaller model.
-                                """)
-                        # Convert int16 -> float32
-                        pcm_array = (
-                            np.frombuffer(pcm_buffer[:MAX_BYTES_PER_SEC], dtype=np.int16).astype(np.float32)
-                            / 32768.0
-                        )
-                        pcm_buffer = pcm_buffer[MAX_BYTES_PER_SEC:]
-                        logger.info(f"{len(online.audio_buffer) / online.SAMPLING_RATE} seconds of audio will be processed by the model.")
-                        online.insert_audio_chunk(pcm_array)
-                        transcription = online.process_iter()
-                        
-                        if transcription.text == "":
-                            continue
-
-                        print("Send:", transcription.text)
-                        await tts_ws.send(transcription.text)
-                        tts = await tts_ws.recv()
-                        await websocket.send_bytes(tts)
 
     except WebSocketDisconnect:
         logger.warning("WebSocket disconnected.")
